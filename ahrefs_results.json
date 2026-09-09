@@ -1,0 +1,30 @@
+{
+  "musemedspaaustin.com": {
+    "dr": 8.0,
+    "ahrefs_rank": 21111367,
+    "org_traffic": 46,
+    "org_keywords": 5,
+    "org_cost": 7593
+  },
+  "refineaesthetics.com": {
+    "dr": 21.0,
+    "ahrefs_rank": 7928678,
+    "org_traffic": 770,
+    "org_keywords": 107,
+    "org_cost": 146318
+  },
+  "www.vivadayspa.com": {
+    "dr": 50.0,
+    "ahrefs_rank": 731579,
+    "org_traffic": 28208,
+    "org_keywords": 2240,
+    "org_cost": 3717226
+  },
+  "beauxmedspa.com": {
+    "dr": 24.0,
+    "ahrefs_rank": 6909484,
+    "org_traffic": 205,
+    "org_keywords": 108,
+    "org_cost": 41410
+  }
+}
