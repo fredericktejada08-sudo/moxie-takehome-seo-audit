@@ -19,6 +19,8 @@ the same .env this machine's other Ahrefs scripts use, unless --ahrefs-env is gi
 """
 import argparse
 import datetime
+import gzip
+import io
 import json
 import os
 import re
@@ -27,6 +29,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 
 DEFAULT_AHREFS_ENV = "/home/fredericktejada/TMC/Ahrefs API/.env"
 AHREFS_BASE = "https://api.ahrefs.com/v3"
@@ -40,17 +43,34 @@ PLATFORM_MARKERS = {
 }
 
 
+def _maybe_decompress(body, headers):
+    """urllib does not auto-decompress responses. Some servers (Wayback Machine's
+    Cloudflare-fronted mementos included) send Content-Encoding: gzip regardless of
+    whether it was requested — undecoded, this silently turns HTML into binary noise
+    that every downstream text check (platform fingerprint, title/meta regex) then
+    reads as empty/garbage without erroring, which is worse than a loud failure."""
+    encoding = (headers.get("Content-Encoding") or "").lower()
+    try:
+        if encoding == "gzip":
+            return gzip.decompress(body)
+        if encoding == "deflate":
+            return zlib.decompress(body)
+    except Exception:
+        pass
+    return body
+
+
 def fetch(url, out_path=None, timeout=20, retries=1):
     last_err = None
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, headers={"User-Agent": UA})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = resp.read()
+                body = _maybe_decompress(resp.read(), resp.headers)
                 status = resp.status
                 break
         except urllib.error.HTTPError as e:
-            body = e.read()
+            body = _maybe_decompress(e.read(), e.headers)
             status = e.code
             break
         except Exception as e:
@@ -135,6 +155,86 @@ def wayback_capture_html(domain, timestamp):
     return status, html
 
 
+def find_platform_transition(domain, history, live_platform):
+    """Find the MOST RECENT platform migration, by binary-searching backward from the
+    live site's current platform through Wayback capture history.
+
+    Two wrong approaches this deliberately avoids:
+    1. Comparing only the last archived capture to the live site — gives a FALSE
+       NEGATIVE once Wayback has re-crawled the new platform (can happen within days):
+       "last capture" already matches "live" even though the migration happened and
+       legacy URLs may still be broken.
+    2. Comparing against the FIRST archived capture's platform — finds whatever
+       migration happened earliest in the site's history (e.g. a 2019 Squarespace ->
+       WordPress switch), not the most recent one, if a site has changed platforms
+       more than once.
+
+    This instead binary-searches for the earliest capture that already matches the
+    LIVE platform, assuming the site has stayed on its current platform continuously
+    since adopting it (true for the realistic case of "one redesign, still live").
+    Everything before that boundary is the prior platform — that's what's tested for
+    broken legacy URLs.
+
+    Returns a dict with at least `detected` (bool) and `checked` (bool).
+    """
+    if not history:
+        return {"detected": False, "checked": False}
+
+    cache = {}
+
+    def platform_at(idx):
+        ts = history[idx][1]
+        if ts not in cache:
+            _, capture_html = wayback_capture_html(domain, ts)
+            cache[ts] = detect_platform(capture_html)
+        return cache[ts]
+
+    last_idx = len(history) - 1
+    last_capture_platform = platform_at(last_idx)
+
+    if last_capture_platform == "unknown":
+        return {"detected": False, "checked": True,
+                "note": "could not fingerprint the most recent Wayback capture"}
+
+    if last_capture_platform != live_platform:
+        # Even the most recent archived capture predates the current platform —
+        # a very recent migration Wayback hasn't caught up to at all yet.
+        last_old_ts = history[last_idx][1]
+        return {
+            "detected": True, "checked": True,
+            "last_old_capture": last_old_ts, "last_old_platform": last_capture_platform,
+            "first_new_capture": None, "live_platform": live_platform,
+        }
+
+    # Binary search for the earliest index whose platform already matches `live_platform`.
+    lo, hi = 0, last_idx
+    first_new_idx = last_idx  # sentinel: at worst, the last capture itself
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        plat = platform_at(mid)
+        if plat == live_platform:
+            first_new_idx = mid
+            hi = mid - 1
+        else:
+            # Treat "unknown" the same as "doesn't match yet" — a safe, documented
+            # bias toward assuming the migration is more recent than an ambiguous capture.
+            lo = mid + 1
+
+    if first_new_idx == 0:
+        return {"detected": False, "checked": True,
+                "note": "earliest available capture already matches the live platform"}
+
+    last_old_idx = first_new_idx - 1
+    return {
+        "detected": True,
+        "checked": True,
+        "last_old_capture": history[last_old_idx][1],
+        "last_old_platform": platform_at(last_old_idx),
+        "first_new_capture": history[first_new_idx][1],
+        "live_platform": live_platform,
+    }
+
+
 def extract_internal_links(html, domain):
     if not html:
         return []
@@ -206,34 +306,25 @@ def main():
     history = wayback_history(domain)
     with open(os.path.join(out_dir, "wayback_history.json"), "w") as f:
         json.dump(history, f, indent=2)
-    migration = {"detected": False}
-    if history:
-        first_ts = history[0][1]
-        last_ts = history[-1][1]
-        _, first_html = wayback_capture_html(domain, first_ts)
-        _, last_html = wayback_capture_html(domain, last_ts)
-        first_platform = detect_platform(first_html)
-        last_platform = detect_platform(last_html)
-        # also check live site's current platform
-        live_status, live_html = pages.get("/") and fetch(args.url)
-        live_platform = detect_platform(live_html)
-        migration = {
-            "first_capture": first_ts, "first_platform": first_platform,
-            "last_wayback_capture": last_ts, "last_wayback_platform": last_platform,
-            "live_platform": live_platform,
-            "detected": last_platform != live_platform and last_platform != "unknown",
-        }
-        if migration["detected"]:
-            print(f"    -> platform change detected: {last_platform} (archived {last_ts[:8]}) -> {live_platform} (live)")
-            legacy_paths = extract_internal_links(last_html, domain)[: args.legacy_redirect_sample]
-            print(f"[3b/6] Testing {len(legacy_paths)} legacy URLs from the last {last_platform} capture against the live site...")
-            redirect_tests = [test_redirect(domain, p) for p in legacy_paths]
-            broken = [r for r in redirect_tests if str(r["final_status"]).startswith("4")]
-            migration["legacy_urls_tested"] = len(redirect_tests)
-            migration["legacy_urls_broken"] = len(broken)
-            migration["redirect_test_detail"] = redirect_tests
-        else:
-            print("    -> no platform change detected between last archived capture and live site")
+    _, live_html_for_platform = fetch(args.url)
+    live_platform = detect_platform(live_html_for_platform)
+    migration = find_platform_transition(domain, history, live_platform)
+    if migration["detected"]:
+        last_old_ts = migration["last_old_capture"]
+        print(f"    -> platform change detected: {migration['last_old_platform']} "
+              f"(last seen archived {last_old_ts[:8]}) -> {live_platform} (live)")
+        _, last_old_html = wayback_capture_html(domain, last_old_ts)
+        legacy_paths = extract_internal_links(last_old_html, domain)[: args.legacy_redirect_sample]
+        print(f"[3b/6] Testing {len(legacy_paths)} legacy URLs from the last {migration['last_old_platform']} capture against the live site...")
+        redirect_tests = [test_redirect(domain, p) for p in legacy_paths]
+        broken = [r for r in redirect_tests if str(r["final_status"]).startswith("4")]
+        migration["legacy_urls_tested"] = len(redirect_tests)
+        migration["legacy_urls_broken"] = len(broken)
+        migration["redirect_test_detail"] = redirect_tests
+    elif migration.get("checked"):
+        print("    -> no platform change detected in capture history")
+    else:
+        print("    -> no Wayback capture history found for this domain")
     result["migration_check"] = migration
 
     # 4. Ahrefs competitive data

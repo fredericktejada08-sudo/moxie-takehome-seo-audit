@@ -12,10 +12,23 @@ is what caught the real finding the on-page read alone missed.
 
 ## Usage
 
+Two ways to run this, depending on the audience:
+
+**Non-technical user — local dashboard, no command-line flags:**
+```
+python3 ~/.claude/skills/seo-audit/dashboard.py
+```
+Opens a browser at `http://localhost:8799` with a plain form (website URL, optional competitor
+sites, optional search terms). Fill it in, click "Run audit," get a plain-English report with a
+clear red/green banner for the migration check, a competitive table, and a numbered priority list —
+no JSON, no code. It calls the Anthropic API directly (key loaded the same way the rest of this
+machine's scripts do — see `call_claude()` in `dashboard.py`) to write the plain-English synthesis;
+if that key isn't available it still shows all the raw evidence, just without the write-up.
+
+**Technical user / inside Claude Code:**
 ```
 /seo-audit <url> [competitor1.com,competitor2.com,...]
 ```
-
 Example: `/seo-audit https://example-medspa.com refineaesthetics.com,vivadayspa.com`
 
 If no competitors are given, either skip the competitive-benchmark step or ask the user for 1-3 real
@@ -40,10 +53,21 @@ from that last capture and tests each one against the live site for a broken (4x
 `legacy_urls_broken / legacy_urls_tested` in `SUMMARY.md`. Read that file first — it's the deterministic
 ground truth everything else builds on.
 
-Known limitation, already handled but worth knowing about: the Wayback CDX API is slower than a normal
-page fetch and can take 30-45s on a domain with a long capture history — the script uses a longer
-timeout with one retry for Wayback calls specifically. If `wayback_history.json` still comes back
-empty, say so plainly rather than assuming "no migration."
+Known limitations, already handled but worth knowing about:
+- The Wayback CDX API is slower than a normal page fetch and can take 30-45s on a domain with a long
+  capture history — the script uses a longer timeout with one retry for Wayback calls specifically.
+  If `wayback_history.json` still comes back empty, say so plainly rather than assuming "no migration."
+- Some archived pages (and the live site itself, on some hosts) are served gzip-compressed; `fetch()`
+  now decompresses based on `Content-Encoding` — without this it silently reads binary noise as "empty"
+  HTML rather than erroring, which is worse than a loud failure. If a page's on-page facts look
+  suspiciously empty, check this before assuming the page has no content.
+- Migration detection (`find_platform_transition`) binary-searches BACKWARD from the live site's
+  current platform through capture history, not forward from the first capture. Comparing only the
+  last archived capture to live gives a false negative once Wayback re-crawls the new platform (can
+  happen within days); comparing against the *first* capture finds whichever migration happened
+  earliest in the site's history, not the most recent one, on a site that's changed platforms more than
+  once. Verified against a real case (`musemedspaaustin.com`) that had switched Squarespace→WordPress in
+  2019 and WordPress→Webflow in 2026 — the correct, recent answer is the second one.
 
 ## Step 2 — Live checks that can't be scripted (do these directly)
 

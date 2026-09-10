@@ -7,8 +7,19 @@ an AI SEO-audit agent for synthesis, verification, and prioritization.
 ## Run it again, on a different site
 
 This isn't a one-off script — the whole method is packaged as a reusable command
-(`.claude/skills/seo-audit/`, a [Claude Code](https://claude.com/claude-code) skill). Starting point:
+(`.claude/skills/seo-audit/`, a [Claude Code](https://claude.com/claude-code) skill), in two forms.
 
+**For a non-technical user — a local dashboard, no command line:**
+```bash
+python3 .claude/skills/seo-audit/dashboard.py
+```
+Opens a browser at `http://localhost:8799` with a plain form: website URL, optional competitor sites,
+optional search terms to check demand for. Click "Run audit," get back a plain-English report — a
+clear banner on whether a broken site migration was found, a competitive table, and a numbered list of
+what to fix first. It calls the Anthropic API directly to write the plain-English part; if no API key
+is configured it still shows all the real evidence, just without the narrative.
+
+**For a technical user:**
 ```bash
 python3 .claude/skills/seo-audit/gather_evidence.py \
   --url https://some-other-medspa.com \
@@ -17,10 +28,18 @@ python3 .claude/skills/seo-audit/gather_evidence.py \
   --out ~/projects/seo-audits/some-other-medspa
 ```
 
-That handles every scriptable part: page fetch, robots.txt, real Ahrefs competitive data, and —
-the important one — a Wayback Machine platform-fingerprint check that automatically tests real legacy
-URLs against the live site if it detects a migration. It was re-run against a second, unrelated Austin
-medspa (`beauxmedspa.com`) while building this to confirm it actually generalizes, not just works once.
+Both share the same underlying evidence-gathering: page fetch, robots.txt, real Ahrefs competitive
+data, and — the important one — a Wayback Machine platform-migration check that automatically tests
+real legacy URLs against the live site if it detects one. That detection deliberately binary-searches
+*backward from the live site's current platform* through capture history, not forward from the site's
+very first capture — comparing only the two endpoints gives a false negative once Wayback re-crawls the
+new platform, and comparing against the first-ever capture finds the *earliest* migration a site ever
+made rather than the most recent one. Verified against `musemedspaaustin.com` itself, which turns out
+to have migrated twice (Squarespace→WordPress in 2019, then WordPress→Webflow in 2026) — the tool
+correctly finds the recent one, not the older one. Also re-run against a second, unrelated Austin
+medspa (`beauxmedspa.com`, no migration) while building this, specifically to confirm it generalizes
+and doesn't produce a false positive.
+
 `SKILL.md` documents the two steps that still need a live tool (Google Business Profile, Core Web
 Vitals) and how to synthesize everything into a report. See `.claude/skills/seo-audit/SKILL.md` for
 the full procedure.
