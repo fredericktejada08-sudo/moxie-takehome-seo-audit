@@ -19,7 +19,6 @@ import html
 import json
 import os
 import re
-import socketserver
 import sys
 import threading
 import time
@@ -27,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -43,6 +42,11 @@ meta description, headings, structured-data types found, image alt-text coverage
 pages, real Ahrefs competitive benchmark numbers, and a Wayback Machine platform-migration check that \
 may have found broken legacy URLs after a site redesign.
 
+You may also be given real Google Business Profile data (rating, review count, category, address) from \
+the Google Places API, and real Core Web Vitals from PageSpeed Insights — if present, use them; if a \
+field is missing or an error is shown instead, say plainly that it could not be retrieved rather than \
+guessing at a number.
+
 Rules:
 - Only state things the evidence actually shows. Do not invent metrics, rankings, or claims you \
 were not given.
@@ -50,13 +54,19 @@ were not given.
 and explain simply why it matters (old links and search history pointing at dead pages).
 - Avoid SEO jargon where possible; where a technical term is unavoidable (e.g. "schema markup"), \
 define it in one short clause the first time you use it.
-- Explicitly say what could NOT be checked automatically (e.g. the business's real Google Business \
-Profile rating, real-user page speed) rather than guessing or ignoring it.
+- Explicitly say what could NOT be checked automatically rather than guessing or ignoring it.
+- If the Google Business Profile locality/address data disagrees with what the website itself says \
+(e.g. the site targets a different city name than the official address), note it as worth a human \
+double-check rather than asserting confidently which one is "wrong" — city/postal boundaries can
+genuinely differ from common local naming.
 - End with a short numbered list: the top 3-5 things to fix, in priority order, each with a one-line \
 plain-English reason "why it matters", written so a non-technical owner could hand it to a web \
 developer as-is.
 
-Write in plain paragraphs and simple numbered/bulleted lists. No code blocks."""
+Write in plain paragraphs and simple numbered/bulleted lists. No code blocks, and no markdown tables —
+the dashboard already renders its own data tables for the Ahrefs and keyword numbers separately, so a
+table in your text would just duplicate them and render as broken text in this renderer. If you want to
+compare numbers, do it in a sentence or a short bulleted list instead."""
 
 
 def load_anthropic_key():
@@ -102,7 +112,7 @@ def extract_onpage_facts(url, html_text):
     if not desc_m:
         desc_m = re.search(r'<meta[^>]*content="([^"]*)"[^>]*name="description"', html_text, re.I)
     h1s = re.findall(r"<h1[^>]*>(.*?)</h1>", html_text, re.I | re.S)
-    h1s = [re.sub(r"<[^>]+>", "", h).strip() for h in h1s]
+    h1s = [html.unescape(re.sub(r"<[^>]+>", "", h)).strip() for h in h1s]
     jsonld_types = []
     for block in re.findall(r'<script type="application/ld\+json">(.*?)</script>', html_text, re.S):
         try:
@@ -146,7 +156,7 @@ def discover_pages(base_url, home_html):
     return [""] + picked  # "" = homepage itself
 
 
-def run_audit(url, competitors, keywords):
+def run_audit(url, competitors, keywords, business_query=""):
     result = {"url": url, "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
     domain = urllib.parse.urlparse(url).netloc
 
@@ -201,6 +211,34 @@ def run_audit(url, competitors, keywords):
         if r:
             kw_results = r.get("keywords", [])
     result["keywords"] = kw_results
+
+    # Real Google Business Profile data (Places API) + real Core Web Vitals (PageSpeed
+    # Insights) — both use the same Google Maps Platform key already provisioned for a
+    # separate lead-gen project on this machine, rather than screen-scraping a live
+    # browser session for the same facts.
+    maps_key = ge.google_maps_key()
+    gbp = {}
+    if maps_key:
+        query = business_query.strip() or f"{(page_facts[0].get('title') or domain)} {domain}"
+        place_id, err = ge.places_text_search(query, maps_key)
+        if place_id:
+            details, err2 = ge.places_details(place_id, maps_key)
+            gbp = details or {}
+            if err2:
+                gbp["error"] = err2
+        else:
+            gbp = {"error": err}
+    else:
+        gbp = {"error": "GOOGLE_MAPS_API_KEY not configured — see SKILL.md"}
+    result["google_business_profile"] = gbp
+
+    pagespeed = {}
+    if maps_key:
+        ps, err = ge.pagespeed_insights(url, maps_key)
+        pagespeed = ps or {"error": err}
+    else:
+        pagespeed = {"error": "GOOGLE_MAPS_API_KEY not configured — see SKILL.md"}
+    result["pagespeed"] = pagespeed
 
     # Ask Claude to turn the raw evidence into a plain-English, prioritized report.
     evidence_for_claude = {k: v for k, v in result.items() if k != "generated_at"}
@@ -300,6 +338,11 @@ plain-English report of what to fix first.</p>
   <input type="text" id="keywords" name="keywords" placeholder="laser hair removal austin">
   <div class="hint">Comma-separated. Real monthly search volume will be looked up for each.</div>
 
+  <label for="business_query">Business name &amp; city (optional)</label>
+  <input type="text" id="business_query" name="business_query" placeholder="Muse MedSpa, Austin TX">
+  <div class="hint">Improves the Google Business Profile match. Left blank, the page title is used
+  as a best guess.</div>
+
   <button type="submit">Run audit</button>
 </form>
 """ + PAGE_TAIL
@@ -332,6 +375,34 @@ def render_results(r):
         parts.append(f'<div class="card">{markdown_lite_to_html(r["ai_summary"])}</div>')
     elif r.get("ai_error"):
         parts.append(f'<div class="banner neutral">{esc(r["ai_error"])}</div>')
+
+    gbp = r.get("google_business_profile") or {}
+    parts.append("<h2>Google Business Profile (real Google data)</h2>")
+    if gbp.get("rating") is not None:
+        parts.append('<div class="card">')
+        parts.append(f'<strong>{esc(gbp.get("name"))}</strong> — {esc(gbp.get("category") or "")}<br>')
+        parts.append(f'⭐ {esc(gbp.get("rating"))} ({esc(gbp.get("review_count"))} Google reviews)<br>')
+        parts.append(f'{esc(gbp.get("address") or "")}<br>')
+        if gbp.get("business_status") and gbp["business_status"] != "OPERATIONAL":
+            parts.append(f'<span class="small">Status: {esc(gbp["business_status"])}</span><br>')
+        if gbp.get("maps_url"):
+            parts.append(f'<a href="{esc(gbp["maps_url"])}" target="_blank">View on Google Maps</a>')
+        parts.append("</div>")
+    else:
+        parts.append(f'<div class="banner neutral">Not available: {esc(gbp.get("error", "unknown reason"))}</div>')
+
+    ps = r.get("pagespeed") or {}
+    parts.append("<h2>Page speed (real Core Web Vitals)</h2>")
+    if ps.get("performance_score") is not None:
+        parts.append('<div class="card">')
+        parts.append(f'Performance score: {esc(round(ps["performance_score"] * 100))}/100<br>')
+        parts.append(f'Largest Contentful Paint: {esc(ps.get("lcp"))} '
+                      f'<span class="small">(how fast the main content appears)</span><br>')
+        parts.append(f'Cumulative Layout Shift: {esc(ps.get("cls"))} '
+                      f'<span class="small">(how much the page jumps around while loading)</span>')
+        parts.append("</div>")
+    else:
+        parts.append(f'<div class="banner neutral">Not available: {esc(ps.get("error", "unknown reason"))}</div>')
 
     parts.append("<h2>Pages checked</h2>")
     for p in r["pages"]:
@@ -396,6 +467,7 @@ class Handler(BaseHTTPRequestHandler):
         url = (fields.get("url", [""])[0] or "").strip()
         competitors = (fields.get("competitors", [""])[0] or "").split(",")
         keywords = (fields.get("keywords", [""])[0] or "").split(",")
+        business_query = (fields.get("business_query", [""])[0] or "").strip()
 
         if not re.match(r"^https?://", url):
             url = "https://" + url
@@ -408,7 +480,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            result = run_audit(url, competitors, keywords)
+            result = run_audit(url, competitors, keywords, business_query)
             body = render_results(result).encode()
         except Exception as e:
             body = render_form(error=f"Something went wrong running the audit: {e}").encode()
@@ -421,7 +493,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    server = socketserver.ThreadingTCPServer(("127.0.0.1", PORT), Handler)
+    # ThreadingHTTPServer (unlike raw socketserver.ThreadingTCPServer) sets
+    # SO_REUSEADDR by default — without it, restarting this script quickly after
+    # stopping it fails with "Address already in use" for up to ~60s while the OS
+    # holds the old socket in TIME_WAIT. Hit this directly while testing restarts.
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     url = f"http://localhost:{PORT}"
     print(f"SEO Audit Dashboard running at {url}")
     print("Press Ctrl+C to stop.")

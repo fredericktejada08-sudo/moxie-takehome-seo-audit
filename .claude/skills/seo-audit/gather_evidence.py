@@ -33,6 +33,18 @@ import zlib
 
 DEFAULT_AHREFS_ENV = "/home/fredericktejada/TMC/Ahrefs API/.env"
 AHREFS_BASE = "https://api.ahrefs.com/v3"
+# Reuses the Google Maps Platform key already provisioned for a separate lead-gen
+# project (leadgen-starter) rather than requiring a new one — same reuse pattern as
+# the Ahrefs .env above. That project also uses this key for PageSpeed Insights.
+DEFAULT_GOOGLE_MAPS_ENV = "/home/fredericktejada/projects/leadgen-starter/leadgen/.env"
+PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+PLACES_DETAILS_URL = "https://places.googleapis.com/v1/places/{place_id}"
+PAGESPEED_URL = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
+PLACES_DETAILS_FIELD_MASK = ",".join([
+    "id", "displayName", "formattedAddress", "location", "nationalPhoneNumber",
+    "websiteUri", "rating", "userRatingCount", "regularOpeningHours",
+    "businessStatus", "types", "primaryTypeDisplayName", "googleMapsUri",
+])
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 PLATFORM_MARKERS = {
     "webflow": ["webflow", "website-files.com"],
@@ -130,6 +142,83 @@ def ahrefs_domain_data(domain, token, country, as_of_date):
         out["org_keywords"] = m["metrics"].get("org_keywords")
         out["org_cost"] = m["metrics"].get("org_cost")
     return out
+
+
+def google_maps_key(env_path=DEFAULT_GOOGLE_MAPS_ENV):
+    env = load_env(env_path)
+    return env.get("GOOGLE_MAPS_API_KEY", "") or env.get("PAGESPEED_API_KEY", "")
+
+
+def places_text_search(query, api_key):
+    """Find a business's Google Place ID by name/address text query.
+    Cheapest Places API (New) SKU (IDs-only field mask)."""
+    body = json.dumps({"textQuery": query, "pageSize": 1}).encode()
+    req = urllib.request.Request(
+        PLACES_TEXT_SEARCH_URL, data=body, method="POST",
+        headers={"Content-Type": "application/json", "X-Goog-Api-Key": api_key,
+                 "X-Goog-FieldMask": "places.id,places.displayName"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        return None, f"Places Text Search {e.code}: {e.read().decode()[:300]}"
+    places = data.get("places") or []
+    if not places:
+        return None, "no matching place found"
+    return places[0]["id"], None
+
+
+def places_details(place_id, api_key):
+    """Real Google Business Profile data: rating, review count, category,
+    address, phone, hours, business status — the contact-tier Places SKU."""
+    req = urllib.request.Request(
+        PLACES_DETAILS_URL.format(place_id=place_id),
+        headers={"X-Goog-Api-Key": api_key, "X-Goog-FieldMask": PLACES_DETAILS_FIELD_MASK})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        return None, f"Place Details {e.code}: {e.read().decode()[:300]}"
+    return {
+        "name": data.get("displayName", {}).get("text"),
+        "address": data.get("formattedAddress"),
+        "phone": data.get("nationalPhoneNumber"),
+        "website": data.get("websiteUri"),
+        "rating": data.get("rating"),
+        "review_count": data.get("userRatingCount"),
+        "category": data.get("primaryTypeDisplayName", {}).get("text") or ", ".join(data.get("types", [])[:3]),
+        "business_status": data.get("businessStatus"),
+        "has_hours": bool(data.get("regularOpeningHours")),
+        "maps_url": data.get("googleMapsUri"),
+    }, None
+
+
+def pagespeed_insights(url, api_key, strategy="mobile"):
+    """Real Core Web Vitals via Google's own API — used with a dedicated key so
+    this doesn't share the low-volume anonymous quota (that quota is what returned
+    a 429 during manual testing earlier in this project's build)."""
+    params = {"url": url, "strategy": strategy, "category": "performance", "key": api_key}
+    req_url = f"{PAGESPEED_URL}?{urllib.parse.urlencode(params)}"
+    try:
+        with urllib.request.urlopen(req_url, timeout=45) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        return None, f"PageSpeed Insights {e.code}: {e.read().decode()[:300]}"
+    except Exception as e:
+        return None, f"PageSpeed Insights failed: {e}"
+    lr = data.get("lighthouseResult", {})
+    audits = lr.get("audits", {})
+    out = {
+        "performance_score": lr.get("categories", {}).get("performance", {}).get("score"),
+        "lcp": audits.get("largest-contentful-paint", {}).get("displayValue"),
+        "cls": audits.get("cumulative-layout-shift", {}).get("displayValue"),
+        "fcp": audits.get("first-contentful-paint", {}).get("displayValue"),
+        "tbt": audits.get("total-blocking-time", {}).get("displayValue"),
+    }
+    field_data = data.get("loadingExperience", {}).get("metrics")
+    if field_data:
+        out["real_user_field_data"] = field_data  # actual CrUX data, not just a lab run
+    return out, None
 
 
 def wayback_history(domain):
@@ -278,6 +367,11 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--legacy-redirect-sample", type=int, default=15,
                      help="Max legacy URLs to test if a platform migration is detected")
+    ap.add_argument("--business-query", default="",
+                     help='Business name + address for Google Business Profile lookup, e.g. '
+                          '"Muse MedSpa, 4201 Bee Caves Rd, Austin TX". Falls back to the homepage '
+                          "title + domain if not given.")
+    ap.add_argument("--google-maps-env", default=DEFAULT_GOOGLE_MAPS_ENV)
     args = ap.parse_args()
 
     domain = urllib.parse.urlparse(args.url).netloc or args.url
@@ -355,7 +449,50 @@ def main():
         print("[5/6] Skipped keyword pull: no Ahrefs token")
     result["ahrefs_keywords"] = kw_results
 
-    print("[6/6] Writing evidence.json + SUMMARY.md...")
+    # 6. Real Google Business Profile data + real Core Web Vitals (Places API +
+    # PageSpeed Insights), reusing the Google Maps Platform key already provisioned
+    # for a separate lead-gen project on this machine — same reuse pattern as Ahrefs.
+    maps_key = google_maps_key(args.google_maps_env)
+    gbp, pagespeed = {}, {}
+    if maps_key:
+        print("[6/8] Google Business Profile (Places API)...")
+        query = args.business_query.strip()
+        if not query:
+            # Fall back to the homepage's <title> (already fetched in step 1) + domain.
+            home_path = next(iter(pages), None)
+            home_file = pages.get(home_path, {}).get("file") if home_path is not None else None
+            title_text = ""
+            if home_file:
+                home_file_path = os.path.join(out_dir, home_file)
+                if os.path.exists(home_file_path):
+                    with open(home_file_path, encoding="utf-8", errors="replace") as f:
+                        title_m = re.search(r"<title>(.*?)</title>", f.read(20000), re.I | re.S)
+                        if title_m:
+                            title_text = re.sub(r"<[^>]+>", "", title_m.group(1)).strip()
+            query = f"{title_text} {domain}".strip() or domain
+        place_id, err = places_text_search(query, maps_key)
+        if place_id:
+            gbp, err2 = places_details(place_id, maps_key)
+            if err2:
+                gbp = {"error": err2}
+        else:
+            gbp = {"error": err}
+        if gbp.get("error"):
+            print(f"    -> not found: {gbp['error']}")
+        else:
+            print(f"    -> {gbp.get('name')}: {gbp.get('rating')}★ ({gbp.get('review_count')} reviews)")
+
+        print("[7/8] Core Web Vitals (PageSpeed Insights)...")
+        ps, ps_err = pagespeed_insights(args.url, maps_key)
+        pagespeed = ps or {"error": ps_err}
+        if ps_err:
+            print(f"    -> not available: {ps_err.splitlines()[0]}")
+    else:
+        print(f"[6-7/8] Skipped Places/PageSpeed: GOOGLE_MAPS_API_KEY not found at {args.google_maps_env}")
+    result["google_business_profile"] = gbp
+    result["pagespeed"] = pagespeed
+
+    print("[8/8] Writing evidence.json + SUMMARY.md...")
     with open(os.path.join(out_dir, "evidence.json"), "w") as f:
         json.dump(result, f, indent=2)
 
@@ -377,10 +514,28 @@ def main():
             f.write("\n## Ahrefs keywords\n| Keyword | Volume/mo | Difficulty | CPC (cents) |\n|---|---|---|---|\n")
             for k in kw_results:
                 f.write(f"| {k['keyword']} | {k.get('volume','?')} | {k.get('difficulty','?')} | {k.get('cpc','?')} |\n")
+        f.write("\n## Google Business Profile (real Places API data)\n")
+        if gbp.get("error"):
+            f.write(f"Not available: {gbp['error']}\n")
+        elif gbp:
+            f.write(f"**{gbp.get('name')}** — {gbp.get('category')}\n\n"
+                    f"{gbp.get('rating')}★ ({gbp.get('review_count')} Google reviews) — {gbp.get('address')}\n\n"
+                    f"Maps: {gbp.get('maps_url')}\n")
+        f.write("\n## Core Web Vitals (real PageSpeed Insights data)\n")
+        if pagespeed.get("error"):
+            f.write(f"Not available: {pagespeed['error'].splitlines()[0]}\n")
+        elif pagespeed:
+            f.write(f"Performance score: {round((pagespeed.get('performance_score') or 0) * 100)}/100, "
+                    f"LCP {pagespeed.get('lcp')}, CLS {pagespeed.get('cls')}\n")
 
     print(f"\nDone. Evidence written to {out_dir}/")
-    print("Still needed (not scriptable here): a live Google Business Profile check and, if useful, a")
-    print("Playwright-measured LCP/CLS fallback if PageSpeed Insights is rate-limited. See SKILL.md.")
+    if not maps_key:
+        print("Note: no Google Maps Platform key found, so Google Business Profile and Core Web Vitals")
+        print(f"were skipped. Set GOOGLE_MAPS_API_KEY in {args.google_maps_env} to enable both.")
+    elif pagespeed.get("error"):
+        print("Note: Core Web Vitals could not be retrieved — the PageSpeed Insights API returned an")
+        print("error for this key's Google Cloud project (see SUMMARY.md). If it's a 403 'blocked'")
+        print("error, enable the PageSpeed Insights API for that project in Google Cloud Console.")
 
 
 if __name__ == "__main__":

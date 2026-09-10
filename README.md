@@ -14,10 +14,19 @@ This isn't a one-off script — the whole method is packaged as a reusable comma
 python3 .claude/skills/seo-audit/dashboard.py
 ```
 Opens a browser at `http://localhost:8799` with a plain form: website URL, optional competitor sites,
-optional search terms to check demand for. Click "Run audit," get back a plain-English report — a
-clear banner on whether a broken site migration was found, a competitive table, and a numbered list of
-what to fix first. It calls the Anthropic API directly to write the plain-English part; if no API key
-is configured it still shows all the real evidence, just without the narrative.
+optional search terms to check demand for, optional business name/address. Click "Run audit," get back
+a plain-English report — a clear banner on whether a broken site migration was found, real Google
+Business Profile data, real Core Web Vitals (once enabled — see below), a competitive table, and a
+numbered list of what to fix first. It calls the Anthropic API directly to write the plain-English
+part; if no API key is configured it still shows all the real evidence, just without the narrative.
+
+**APIs actually wired in, not just described:** Ahrefs (competitive benchmark + keyword volume/
+difficulty), Google Places API (real Business Profile rating/reviews/category — verified to match a
+live Google Search knowledge panel exactly, 4.9★/100 reviews, using a Google Maps Platform key already
+provisioned for a separate project on this machine rather than a new one), and PageSpeed Insights
+(real Core Web Vitals) — that last one currently returns a `403 blocked` error until the PageSpeed
+Insights API is enabled for that key's Google Cloud project; both scripts report that honestly instead
+of faking a score.
 
 **For a technical user:**
 ```bash
@@ -40,9 +49,9 @@ correctly finds the recent one, not the older one. Also re-run against a second,
 medspa (`beauxmedspa.com`, no migration) while building this, specifically to confirm it generalizes
 and doesn't produce a false positive.
 
-`SKILL.md` documents the two steps that still need a live tool (Google Business Profile, Core Web
-Vitals) and how to synthesize everything into a report. See `.claude/skills/seo-audit/SKILL.md` for
-the full procedure.
+`SKILL.md` documents the one step that's still manual (a third-party reputation scan — Yelp/Birdeye/
+etc. — since no general-purpose search API is configured here) and how to synthesize everything into a
+report. See `.claude/skills/seo-audit/SKILL.md` for the full procedure.
 
 - **`AUDIT.md`** — the final deliverable: audit summary, top 6 prioritized recommendations, two
   AI-generated deliverables (rewritten meta titles/descriptions, a GBP/NAP consistency checklist), and
