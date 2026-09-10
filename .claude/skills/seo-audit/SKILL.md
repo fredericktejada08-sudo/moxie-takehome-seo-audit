@@ -19,13 +19,19 @@ Two ways to run this, depending on the audience:
 python3 ~/.claude/skills/seo-audit/dashboard.py
 ```
 Opens a browser at `http://localhost:8799` with a plain form (website URL, optional competitor
-sites, optional search terms, optional business name/address). Fill it in, click "Run audit," get a
-plain-English report with a clear red/green banner for the migration check, real Google Business
-Profile data, real Core Web Vitals (when the API is enabled — see Step 2), a competitive table, and a
-numbered priority list — no JSON, no code. It calls the Anthropic API directly (key loaded the same way
-the rest of this machine's scripts do — see `call_claude()` in `dashboard.py`) to write the
-plain-English synthesis; if that key isn't available it still shows all the raw evidence, just without
-the write-up.
+sites, optional search terms, optional business name/address). **Competitors and keywords are genuinely
+optional** — leave them blank and the dashboard auto-discovers 5 real nearby competitors and generates
+5-10 keyword candidates from the business's own services and category (see Step 2b) — no need to
+already know good comparisons or search terms going in. Click "Run audit," get a plain-English report
+with a clear red/green banner for the migration check, real Google Business Profile data, real Core Web
+Vitals (when the API is enabled — see Step 2), a competitive table, and a numbered priority list — no
+JSON, no code. It calls the Anthropic API directly (key loaded the same way the rest of this machine's
+scripts do — see `call_claude()` in `dashboard.py`) to write the plain-English synthesis; if that key
+isn't available it still shows all the raw evidence, just without the write-up.
+
+The auto-discovery in Step 2b is currently wired into `dashboard.py` only. The CLI (`gather_evidence.py`,
+Step 1) still requires explicit `--competitors`/`--keywords` and skips those lookups if not given — it
+hasn't been extended to auto-populate the same way yet.
 
 **Technical user / inside Claude Code:**
 ```
@@ -99,6 +105,30 @@ a Google Maps Platform key already provisioned for a separate lead-gen project o
   a score) until it's enabled.
 - **Reputation scan** (Yelp/Birdeye/etc.) is still a manual WebSearch step — no general-purpose search
   API is configured on this machine, so don't claim this one is automated.
+
+## Step 2b — Auto-discovering competitors and keywords (if the user doesn't supply them)
+
+Both scripts now auto-populate competitors and keywords from the business's own Places data + real
+internal links, rather than requiring the user already knows good competitor domains and search terms:
+
+- **Competitors** (`find_nearby_competitors`): a Places Text Search for the business's own category near
+  its own city, excluding its own domain and any result with no website. **Do not use `gbp["category"]`
+  (Google's own "primary type" label) as the query** — for a business categorized generically as "Spa",
+  that pulled in resort/hotel day-spas (Omni Hotels, a lake resort) in testing, the wrong comparison set
+  for an independent medspa. Use `best_competitor_query_phrase(gbp["types"])` instead, which prefers the
+  most specific non-generic type in the full `types` list and only falls back to "spa" if nothing more
+  specific exists — verified this finds real comparable businesses (skin clinics, dermatology practices)
+  instead.
+- **Keywords** (`suggest_keywords`): combines the business's own real service-page slugs (via
+  `extract_internal_links` — see the relative-href note below) with its Places category types, each
+  paired with its city. Typically yields 5-10 real, relevant terms.
+- **`extract_internal_links` must match BOTH absolute hrefs (`href="https://domain/path"`) and
+  root-relative hrefs (`href="/path"`).** The absolute-only version of this regex is what the legacy-URL
+  redirect test in Step 1 already relied on (older WordPress-style captures tend to use absolute URLs)
+  — but it silently returned zero results against `musemedspaaustin.com`'s *current* live homepage,
+  because that site's own nav links are all root-relative. This wasn't a hypothetical: it's why keyword
+  auto-suggestion first returned only 4 generic category-based terms with zero of the business's own
+  real services in it, until this was fixed.
 
 ## Step 3 — Synthesize
 

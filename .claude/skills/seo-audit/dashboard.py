@@ -193,29 +193,11 @@ def run_audit(url, competitors, keywords, business_query=""):
         migration["legacy_urls_broken"] = len(broken)
     result["migration"] = migration
 
-    ahrefs = {}
-    token = ge.load_env(ge.DEFAULT_AHREFS_ENV).get("AHREFS_API_TOKEN", "")
-    if token:
-        as_of = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-        domains = [domain] + [c.strip() for c in competitors if c.strip()]
-        for d in domains:
-            ahrefs[d] = ge.ahrefs_domain_data(d, token, "us", as_of)
-    result["ahrefs"] = ahrefs
-
-    kw_results = []
-    kw_terms = [k.strip() for k in keywords if k.strip()]
-    if kw_terms and token:
-        r = ge.ahrefs_get("/keywords-explorer/overview",
-                           {"country": "us", "select": "keyword,volume,difficulty,cpc,clicks,global_volume",
-                            "keywords": ",".join(kw_terms)}, token)
-        if r:
-            kw_results = r.get("keywords", [])
-    result["keywords"] = kw_results
-
     # Real Google Business Profile data (Places API) + real Core Web Vitals (PageSpeed
     # Insights) — both use the same Google Maps Platform key already provisioned for a
     # separate lead-gen project on this machine, rather than screen-scraping a live
-    # browser session for the same facts.
+    # browser session for the same facts. Done before the competitor/keyword lookups
+    # below since those can auto-populate from the business's own category + city.
     maps_key = ge.google_maps_key()
     gbp = {}
     if maps_key:
@@ -239,6 +221,50 @@ def run_audit(url, competitors, keywords, business_query=""):
     else:
         pagespeed = {"error": "GOOGLE_MAPS_API_KEY not configured — see SKILL.md"}
     result["pagespeed"] = pagespeed
+
+    # Auto-populate competitors and keywords from the business's own Places category +
+    # city if the user left those fields blank, instead of requiring they already know
+    # good competitor domains and search terms.
+    user_competitors = [c.strip() for c in competitors if c.strip()]
+    auto_competitors_used = False
+    if not user_competitors and maps_key and gbp.get("types"):
+        # Use the most specific business type, not gbp["category"] (Google's own
+        # "primary type" label) — for this business that's the generic "Spa", and a
+        # Places Text Search for "Spa in Austin, TX" pulled in resort/hotel day-spas
+        # (Omni Hotels, a lake resort) rather than comparable independent medspas.
+        query_phrase = ge.best_competitor_query_phrase(gbp["types"])
+        found, _ = ge.find_nearby_competitors(query_phrase, gbp.get("city") or "", domain, maps_key)
+        user_competitors = [d for _name, d in found]
+        auto_competitors_used = bool(user_competitors)
+    result["competitors_auto_discovered"] = auto_competitors_used
+
+    user_keywords = [k.strip() for k in keywords if k.strip()]
+    auto_keywords_used = False
+    if not user_keywords:
+        all_links = ge.extract_internal_links(home_html, domain)
+        service_like = [p for p in all_links if any(
+            k in p.lower() for k in ["service", "treatment", "product"])]
+        user_keywords = ge.suggest_keywords(service_like, gbp.get("types"), gbp.get("city") or "")
+        auto_keywords_used = bool(user_keywords)
+    result["keywords_auto_discovered"] = auto_keywords_used
+
+    ahrefs = {}
+    token = ge.load_env(ge.DEFAULT_AHREFS_ENV).get("AHREFS_API_TOKEN", "")
+    if token:
+        as_of = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        domains = [domain] + user_competitors
+        for d in domains:
+            ahrefs[d] = ge.ahrefs_domain_data(d, token, "us", as_of)
+    result["ahrefs"] = ahrefs
+
+    kw_results = []
+    if user_keywords and token:
+        r = ge.ahrefs_get("/keywords-explorer/overview",
+                           {"country": "us", "select": "keyword,volume,difficulty,cpc,clicks,global_volume",
+                            "keywords": ",".join(user_keywords)}, token)
+        if r:
+            kw_results = r.get("keywords", [])
+    result["keywords"] = kw_results
 
     # Ask Claude to turn the raw evidence into a plain-English, prioritized report.
     evidence_for_claude = {k: v for k, v in result.items() if k != "generated_at"}
@@ -332,11 +358,12 @@ plain-English report of what to fix first.</p>
 
   <label for="competitors">Competitor websites (optional)</label>
   <input type="text" id="competitors" name="competitors" placeholder="competitor1.com, competitor2.com">
-  <div class="hint">Comma-separated. Used to show how this site compares.</div>
+  <div class="hint">Comma-separated. Left blank, nearby similar businesses are found automatically.</div>
 
   <label for="keywords">Search terms to check demand for (optional)</label>
   <input type="text" id="keywords" name="keywords" placeholder="laser hair removal austin">
-  <div class="hint">Comma-separated. Real monthly search volume will be looked up for each.</div>
+  <div class="hint">Comma-separated. Left blank, 5-8 terms are generated automatically from the
+  business's own services and category.</div>
 
   <label for="business_query">Business name &amp; city (optional)</label>
   <input type="text" id="business_query" name="business_query" placeholder="Muse MedSpa, Austin TX">
@@ -423,6 +450,9 @@ def render_results(r):
 
     if r.get("ahrefs"):
         parts.append("<h2>Competitive benchmark (real Ahrefs data)</h2>")
+        if r.get("competitors_auto_discovered"):
+            parts.append('<p class="small">You didn\'t list competitors, so these nearby similar '
+                          'businesses were found automatically via Google.</p>')
         parts.append("<table><tr><th>Site</th><th>Authority score (DR)</th><th>Est. monthly visitors from search</th><th># of search terms it ranks for</th></tr>")
         for d, v in r["ahrefs"].items():
             parts.append(f"<tr><td>{esc(d)}</td><td>{esc(v.get('dr','?'))}</td>"
@@ -431,6 +461,9 @@ def render_results(r):
 
     if r.get("keywords"):
         parts.append("<h2>Search demand for your terms</h2>")
+        if r.get("keywords_auto_discovered"):
+            parts.append('<p class="small">You didn\'t list search terms, so these were generated '
+                          'automatically from the business\'s own services and category.</p>')
         parts.append("<table><tr><th>Search term</th><th>Monthly searches (US)</th><th>Difficulty</th></tr>")
         for k in r["keywords"]:
             parts.append(f"<tr><td>{esc(k.get('keyword'))}</td><td>{esc(k.get('volume','?'))}</td>"

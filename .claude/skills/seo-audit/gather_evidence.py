@@ -41,10 +41,46 @@ PLACES_TEXT_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
 PLACES_DETAILS_URL = "https://places.googleapis.com/v1/places/{place_id}"
 PAGESPEED_URL = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
 PLACES_DETAILS_FIELD_MASK = ",".join([
-    "id", "displayName", "formattedAddress", "location", "nationalPhoneNumber",
-    "websiteUri", "rating", "userRatingCount", "regularOpeningHours",
-    "businessStatus", "types", "primaryTypeDisplayName", "googleMapsUri",
+    "id", "displayName", "formattedAddress", "addressComponents", "location",
+    "nationalPhoneNumber", "websiteUri", "rating", "userRatingCount",
+    "regularOpeningHours", "businessStatus", "types", "primaryTypeDisplayName",
+    "googleMapsUri",
 ])
+PLACES_SEARCH_FIELD_MASK = "places.id,places.displayName,places.websiteUri,places.types"
+# Generic Places "types" that make useless/junk keyword or search-query material.
+GENERIC_PLACE_TYPES = {
+    "point_of_interest", "establishment", "health", "service", "store",
+    "food", "general_contractor", "home_goods_store",
+}
+# Common Places type slugs -> a natural search phrase. Falls back to
+# underscore-to-space for anything not listed here.
+TYPE_TO_PHRASE = {
+    "skin_care_clinic": "skin care clinic", "beauty_salon": "beauty salon",
+    "medical_clinic": "medical spa", "hair_care": "hair care", "spa": "medical spa",
+    "hair_salon": "hair salon", "nail_salon": "nail salon", "dentist": "dentist",
+    "physiotherapist": "physiotherapist", "doctor": "doctor", "gym": "gym",
+    "real_estate_agency": "real estate agent", "lawyer": "lawyer",
+    "restaurant": "restaurant", "cafe": "cafe",
+}
+# "spa" alone is too broad for a competitor SEARCH QUERY specifically — tested live
+# and it pulled in resort/hotel day-spas (Omni Hotels, a lake resort) alongside real
+# independent medspas, which is the wrong comparison set for a business like a
+# medspa doing injectables/laser treatments. This only affects which type is chosen
+# to build the Places Text Search query (below) — TYPE_TO_PHRASE above is still used
+# as-is for keyword suggestion, where "medical spa" from "spa" is a fine keyword to
+# check demand for and collapsing it with "medical_clinic" is fine there.
+COMPETITOR_QUERY_DEPRIORITIZE = {"spa"} | GENERIC_PLACE_TYPES
+
+
+def best_competitor_query_phrase(types):
+    for t in types or []:
+        if t in COMPETITOR_QUERY_DEPRIORITIZE:
+            continue
+        return TYPE_TO_PHRASE.get(t, t.replace("_", " "))
+    for t in types or []:
+        if t == "spa":
+            return "spa"
+    return "business"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 PLATFORM_MARKERS = {
     "webflow": ["webflow", "website-files.com"],
@@ -187,10 +223,78 @@ def places_details(place_id, api_key):
         "rating": data.get("rating"),
         "review_count": data.get("userRatingCount"),
         "category": data.get("primaryTypeDisplayName", {}).get("text") or ", ".join(data.get("types", [])[:3]),
+        "types": data.get("types", []),
+        "city": next((c["longText"] for c in data.get("addressComponents", [])
+                      if "locality" in c.get("types", [])), None),
         "business_status": data.get("businessStatus"),
         "has_hours": bool(data.get("regularOpeningHours")),
         "maps_url": data.get("googleMapsUri"),
     }, None
+
+
+def find_nearby_competitors(category_phrase, city, own_domain, api_key, max_results=5):
+    """Auto-discover real local competitors via Places Text Search (New) instead of
+    requiring the user to already know 1-3 competitor domains. Returns a list of
+    (name, domain) tuples, excluding the target's own domain and any result with no
+    website (directories, chains without a site, etc.)."""
+    query = f"{category_phrase} in {city}" if city else category_phrase
+    body = json.dumps({"textQuery": query, "pageSize": max_results + 3}).encode()
+    req = urllib.request.Request(
+        PLACES_TEXT_SEARCH_URL, data=body, method="POST",
+        headers={"Content-Type": "application/json", "X-Goog-Api-Key": api_key,
+                 "X-Goog-FieldMask": PLACES_SEARCH_FIELD_MASK})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        return [], f"Places Text Search {e.code}: {e.read().decode()[:300]}"
+
+    own_domain_norm = (own_domain or "").lower().lstrip("www.")
+    seen_domains = {own_domain_norm}
+    out = []
+    for place in data.get("places") or []:
+        website = place.get("websiteUri")
+        if not website:
+            continue
+        domain = urllib.parse.urlparse(website).netloc.lower()
+        domain_norm = domain.lstrip("www.")
+        if not domain_norm or domain_norm in seen_domains:
+            continue
+        seen_domains.add(domain_norm)
+        out.append((place.get("displayName", {}).get("text", domain), domain))
+        if len(out) >= max_results:
+            break
+    return out, None
+
+
+def suggest_keywords(service_paths, place_types, city, max_keywords=8):
+    """Build candidate search-demand keywords from what the business actually offers
+    (its own nav/service page slugs and Places category types) + its city, instead of
+    requiring the user to already know good SEO keyword targets. Real volume/difficulty
+    for these still comes from Ahrefs — this only picks WHICH terms to check."""
+    phrases = []
+    for path in service_paths:
+        slug = path.rstrip("/").split("/")[-1]
+        if not slug or slug in ("services", "about", "contact", "contact-us"):
+            continue
+        phrase = slug.replace("-", " ").replace("_", " ").strip()
+        if phrase and phrase not in phrases:
+            phrases.append(phrase)
+    for t in place_types or []:
+        if t in GENERIC_PLACE_TYPES:
+            continue
+        phrase = TYPE_TO_PHRASE.get(t, t.replace("_", " "))
+        if phrase not in phrases:
+            phrases.append(phrase)
+    city_first = (city or "").split(",")[0].strip()
+    keywords = []
+    for phrase in phrases:
+        kw = f"{phrase} {city_first}".strip() if city_first else phrase
+        if kw not in keywords:
+            keywords.append(kw)
+        if len(keywords) >= max_keywords:
+            break
+    return keywords
 
 
 def pagespeed_insights(url, api_key, strategy="mobile"):
@@ -325,10 +429,21 @@ def find_platform_transition(domain, history, live_platform):
 
 
 def extract_internal_links(html, domain):
+    """Internal link paths from a page's <a href> attributes. Matches BOTH absolute
+    URLs (href="https://domain/path" — common on older/WordPress-style sites, which
+    is what the legacy-URL redirect test relies on) AND root-relative hrefs
+    (href="/path" — common on modern site builders like Webflow, including THIS
+    site's current homepage). Missing the relative form isn't a hypothetical: it's
+    why keyword auto-suggestion first returned zero site-derived candidates here —
+    every internal nav link on the live site is root-relative, so the absolute-only
+    version of this regex silently found none."""
     if not html:
         return []
-    pattern = rf'href="https?://(?:www\.)?{re.escape(domain)}/([a-z0-9/_-]*)"'
-    paths = set(re.findall(pattern, html, re.I))
+    bare_domain = domain.lower().lstrip("www.")
+    absolute_pattern = rf'href="https?://(?:www\.)?{re.escape(bare_domain)}/([a-z0-9/_-]*)"'
+    relative_pattern = r'href="/([a-z0-9][a-z0-9/_-]*)"'
+    paths = set(re.findall(absolute_pattern, html, re.I))
+    paths |= set(re.findall(relative_pattern, html, re.I))
     return sorted(p for p in paths if p and not p.startswith("wp-json"))
 
 
