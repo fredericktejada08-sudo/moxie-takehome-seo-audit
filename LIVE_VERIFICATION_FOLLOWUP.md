@@ -11,6 +11,27 @@ tool output, not an estimate — commands/timestamps included so it's independen
 in Google's own SERP knowledge panel for "Muse MedSpa Austin Bee Caves Road" — captured live via
 browser automation. This is what's behind the AUDIT.md GBP checklist.
 
+**Update — cross-checked via the Google Places API (New), a second, independent Google-owned data
+source, while building the reusable `seo-audit` skill.** `places:searchText` + Place Details for this
+exact business returned the identical rating and review count (4.9★, 100 reviews) — confirming that
+part. But its `addressComponents.locality` field says **"Austin,"** not "West Lake Hills":
+
+```json
+{"longText": "Austin", "shortText": "Austin", "types": ["locality", "political"]}
+```
+
+("Hillside Vista" appears as the `neighborhood` component instead.) So two different Google-owned
+surfaces for the *same business* disagree on the city label: the Places API's structured address data
+says Austin (matching what the website itself says), while the Search knowledge-panel display says
+West Lake Hills (a real, separate incorporated city immediately adjacent to this address — the 78746
+ZIP code straddles both). **This weakens the original "regression from the 2026 migration" theory in
+AUDIT.md recommendation 5** — the mechanical explanation (old WordPress title said "Westlake," new
+Webflow title dropped it) is still a real, true fact, but it's no longer safe to assert that's *why*
+the SERP panel shows West Lake Hills, since the formal address data agrees with the website, not with
+the panel. This is now an open question that needs a first-party check (the business's own Google
+Business Profile dashboard, not either external reading) — not something confidently resolved either
+way from outside data. AUDIT.md recommendation 5 has been revised accordingly.
+
 ## 2. Was there a recent platform migration that reset backlink/authority history? — CONFIRMED, and it's worse than "reset history"
 This is the most important finding in the entire audit, and it upgrades recommendation 5 from a
 ranked hypothesis to a proven root cause.

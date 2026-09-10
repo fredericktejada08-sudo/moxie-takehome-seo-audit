@@ -73,13 +73,20 @@ Three separate, independently-confirmed issues: (a) the `/about` page's JSON-LD 
 ~1.5 miles away from where the site's own footer Google Maps link points, and the `/services` page's
 schema puts a Maps URL in a field meant for actual latitude/longitude; (b) live search turned up a
 stale citation on CareCredit's directory still listing Muse's *old* address (5524 Bee Cave Rd) instead
-of the current one (4201 Bee Caves Rd); (c) Google Business Profile categorizes the business under
-"West Lake Hills, Texas" while every page of the *current* site optimizes for "Austin" — and this one
-now has a confirmed mechanical cause, not just a coincidence: the old WordPress site's title
-explicitly said *"Medical Spa Westlake"* (see `LIVE_VERIFICATION_FOLLOWUP.md`), and that geo term was
-simply dropped in the Webflow rewrite. It's a regression from the migration, not a pre-existing gap.
+of the current one (4201 Bee Caves Rd); (c) Google's own Search knowledge panel shows the business
+under "West Lake Hills, Texas" while every page of the site optimizes for "Austin" — **but this one is
+genuinely unresolved, not a confirmed site problem.** A second, independent Google data source (the
+Places API's structured address data) says the formal `locality` for this address is Austin — matching
+the website, not the search panel (see `LIVE_VERIFICATION_FOLLOWUP.md`). Two Google-owned surfaces
+disagree with each other here, and 78746 genuinely straddles both Austin and the separate incorporated
+city of West Lake Hills. The old WordPress site's title did explicitly say "Medical Spa Westlake" and
+the current Webflow site dropped that — a real, verifiable change — but it's no longer safe to claim
+that change is *why* Search shows West Lake Hills, since the formal address record doesn't support
+that theory. Treat (c) as a "confirm with the business owner's own Google Business Profile dashboard"
+item, not a fix to make unilaterally.
 *Rationale: NAP/geo consistency across the web is a direct local-ranking input, separate from
-on-site content quality — and these are all verified sitting live today, not theoretical.*
+on-site content quality — (a) and (b) are clean, actionable fixes; (c) is a real discrepancy worth
+surfacing but the right next step is verification, not a unilateral change, given conflicting evidence.*
 
 **6. Once the redirects are fixed, close the content gap with real, verified demand.** (Medium — sequenced after #1)
 The site's own blog already proves a working content pattern (a lip filler cost post) that hasn't been
@@ -112,9 +119,11 @@ Built from the live GBP check + citation scan, not assumptions:
 
 - [ ] Correct the stale address on CareCredit's directory listing (currently shows the old 5524 Bee
       Cave Rd address instead of the current 4201 Bee Caves Rd #B200)
-- [ ] Decide and standardize the primary city: GBP currently surfaces as "West Lake Hills, Texas"
-      while the entire website optimizes for "Austin" — either add Austin explicitly as a serviced
-      area in GBP or align on-site copy, don't leave this to default categorization
+- [ ] Check the actual Google Business Profile dashboard (first-party, not an external reading) for
+      what city/service-area is set: Google's public Search knowledge panel shows "West Lake Hills,
+      Texas" but the Places API's structured address data for the same listing says "Austin," matching
+      the website — these are two Google-owned surfaces disagreeing with each other, not necessarily a
+      website problem, and it needs a first-party check before anything is changed
 - [ ] Pull the exact lat/long from the live GBP listing and apply it consistently in the site's own
       JSON-LD (currently two different coordinate sources on the site disagree by ~1.5 miles)
 - [ ] Run a full citation audit (Yext, Moz Local, or a manual pass across the major directories) to
@@ -150,6 +159,13 @@ material:
   measuring Core Web Vitals directly in a live browser instead of the tool built for the job.
 - Ahrefs' domain-rating/metrics endpoint rejected `date=today` and required an actual past ISO date —
   a small but real integration gotcha, not something either of us anticipated going in.
+- **This audit corrected itself again after "finishing":** while building a reusable version of this
+  same process (a Claude Code skill, separate from this specific submission), a second Google data
+  source (the Places API) surfaced evidence that *weakens* recommendation 5's original claim — the
+  "West Lake Hills vs. Austin" mismatch had been framed as a confirmed regression from the 2026
+  migration; the new evidence shows Google's own two data surfaces (Places API vs. Search knowledge
+  panel) actually disagree with each other, which is a different and less certain problem. Recommendation
+  5 and the GBP checklist were revised to reflect that rather than left overstated.
 
 ## Files in this folder
 - `home.html`, `services.html`, `services_laser-hair-removal.html`, `about.html` — raw fetched HTML,
