@@ -4,6 +4,27 @@ An SEO audit of [Muse MedSpa](https://www.musemedspaaustin.com/), an independent
 medspa in Austin, TX, combining real tool data (Ahrefs API, live Google Business Profile check) with
 an AI SEO-audit agent for synthesis, verification, and prioritization.
 
+## Run it again, on a different site
+
+This isn't a one-off script — the whole method is packaged as a reusable command
+(`.claude/skills/seo-audit/`, a [Claude Code](https://claude.com/claude-code) skill). Starting point:
+
+```bash
+python3 .claude/skills/seo-audit/gather_evidence.py \
+  --url https://some-other-medspa.com \
+  --competitors competitor1.com,competitor2.com \
+  --pages "/,/about,/services" \
+  --out ~/projects/seo-audits/some-other-medspa
+```
+
+That handles every scriptable part: page fetch, robots.txt, real Ahrefs competitive data, and —
+the important one — a Wayback Machine platform-fingerprint check that automatically tests real legacy
+URLs against the live site if it detects a migration. It was re-run against a second, unrelated Austin
+medspa (`beauxmedspa.com`) while building this to confirm it actually generalizes, not just works once.
+`SKILL.md` documents the two steps that still need a live tool (Google Business Profile, Core Web
+Vitals) and how to synthesize everything into a report. See `.claude/skills/seo-audit/SKILL.md` for
+the full procedure.
+
 - **`AUDIT.md`** — the final deliverable: audit summary, top 6 prioritized recommendations, two
   AI-generated deliverables (rewritten meta titles/descriptions, a GBP/NAP consistency checklist), and
   reflection notes.
